@@ -2,10 +2,24 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..db import get_connection
-from .log_service import log_action
+FILE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = FILE_DIR.parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+try:
+    from ..db import get_connection  # type: ignore
+except ImportError:
+    from db import get_connection
+
+try:
+    from .log_service import log_action  # type: ignore
+except ImportError:
+    from log_service import log_action
 
 try:
     from cryptography.fernet import Fernet
