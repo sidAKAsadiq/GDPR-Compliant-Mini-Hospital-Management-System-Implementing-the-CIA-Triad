@@ -1,0 +1,28 @@
+# Virtual environments
+.venv/
+env/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+
+# Environment files
+.env
+.env.local
+
+# IDE / tooling
+.vscode/
+.idea/
+*.code-workspace
+
+# Streamlit cache
+.streamlit/
+
+# Data exports
+/data/exports/
+*.csv
+
