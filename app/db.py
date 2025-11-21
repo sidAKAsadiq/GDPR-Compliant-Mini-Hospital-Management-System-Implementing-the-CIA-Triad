@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -20,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "hospital.db"
 DB_PATH = Path(os.getenv("DB_PATH", DEFAULT_DB_PATH))
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -122,6 +124,24 @@ def seed_users() -> None:
 def initialize_database() -> None:
     create_tables()
     seed_users()
+
+
+def get_db_path() -> Path:
+    return DB_PATH
+
+
+def read_database_bytes() -> bytes:
+    return DB_PATH.read_bytes()
+
+
+def health_check() -> bool:
+    try:
+        with get_connection() as conn:
+            conn.execute("SELECT 1")
+        return True
+    except Exception as exc:  # pragma: no cover - diagnostic helper
+        logger.exception("Database health check failed: %s", exc)
+        return False
 
 
 if __name__ == "__main__":

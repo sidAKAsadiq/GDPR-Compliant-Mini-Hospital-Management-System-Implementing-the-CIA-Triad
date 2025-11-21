@@ -15,8 +15,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 try:
+    from . import db  # type: ignore
     from .services import auth_service, log_service, patient_service  # type: ignore
 except ImportError:
+    import db
     from services import auth_service, log_service, patient_service
 
 
@@ -94,20 +96,40 @@ def render_admin_panel(user: Dict[str, str]) -> None:
     st.header("Admin Dashboard")
 
     col1, col2 = st.columns(2)
-    with col1:
-        raw_patients = patient_service.list_patients(view="raw")
-        _render_patient_table("Raw Patient Data", raw_patients)
-    with col2:
-        anonymized_patients = patient_service.list_patients(view="anonymized")
-        _render_patient_table("Anonymized Patient Data", anonymized_patients)
+    try:
+        with col1:
+            raw_patients = patient_service.list_patients(view="raw", requested_by=user)
+            _render_patient_table("Raw Patient Data", raw_patients)
+        with col2:
+            anonymized_patients = patient_service.list_patients(
+                view="anonymized", requested_by=user
+            )
+            _render_patient_table("Anonymized Patient Data", anonymized_patients)
+    except PermissionError as exc:
+        st.error(str(exc))
+        return
+    except Exception as exc:
+        st.error(f"Unable to load patient tables: {exc}")
+        return
 
     if st.button("Refresh Anonymized Fields"):
-        patient_service.refresh_anonymized_fields(acted_by=user)
-        st.success("Anonymized fields refreshed.")
-        st.rerun()
+        try:
+            patient_service.refresh_anonymized_fields(acted_by=user)
+        except PermissionError as exc:
+            st.error(str(exc))
+        except Exception as exc:
+            st.error(f"Unable to refresh anonymized data: {exc}")
+        else:
+            st.success("Anonymized fields refreshed.")
+            st.rerun()
 
     st.subheader("Audit Logs")
-    logs = log_service.list_logs(limit=200)
+    try:
+        logs = log_service.list_logs(limit=200)
+    except Exception as exc:
+        st.error(f"Unable to load logs: {exc}")
+        logs = []
+
     if logs:
         logs_df = pd.DataFrame(logs)
         st.dataframe(logs_df, use_container_width=True, hide_index=True)
@@ -120,6 +142,18 @@ def render_admin_panel(user: Dict[str, str]) -> None:
     else:
         st.info("No logs recorded yet.")
 
+    st.subheader("Database Backup")
+    try:
+        backup_bytes = db.read_database_bytes()
+        st.download_button(
+            "Download SQLite Backup",
+            data=backup_bytes,
+            file_name="hospital_backup.db",
+            mime="application/octet-stream",
+        )
+    except Exception as exc:
+        st.error(f"Unable to prepare backup: {exc}")
+
 
 def render_doctor_view(user: Dict[str, str]) -> None:
     if user["role"] not in {"doctor", "admin"}:
@@ -127,7 +161,16 @@ def render_doctor_view(user: Dict[str, str]) -> None:
         return
 
     st.header("Doctor View")
-    anonymized_patients = patient_service.list_patients(view="anonymized")
+    try:
+        anonymized_patients = patient_service.list_patients(
+            view="anonymized", requested_by=user
+        )
+    except PermissionError as exc:
+        st.error(str(exc))
+        return
+    except Exception as exc:
+        st.error(f"Unable to load anonymized data: {exc}")
+        return
     search = st.text_input("Search anonymized name or diagnosis code")
     if search:
         search_lower = search.lower()
@@ -159,15 +202,28 @@ def render_receptionist_workspace(user: Dict[str, str]) -> None:
             if not (name and contact and diagnosis):
                 st.error("All fields are required.")
             else:
-                patient_id = patient_service.create_patient(
-                    name=name, contact=contact, diagnosis=diagnosis, acted_by=user
-                )
-                st.success(f"Patient record created with ID {patient_id}.")
-                st.rerun()
+                try:
+                    patient_id = patient_service.create_patient(
+                        name=name, contact=contact, diagnosis=diagnosis, acted_by=user
+                    )
+                except PermissionError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Unable to create patient: {exc}")
+                else:
+                    st.success(f"Patient record created with ID {patient_id}.")
+                    st.rerun()
 
     st.markdown("---")
     st.subheader("Update Existing Patient")
-    patients = patient_service.list_patients(view="raw")
+    try:
+        patients = patient_service.list_patients(view="raw", requested_by=user)
+    except PermissionError as exc:
+        st.error(str(exc))
+        return
+    except Exception as exc:
+        st.error(f"Unable to load patients for editing: {exc}")
+        return
     patient_ids = [p["patient_id"] for p in patients]
     if not patient_ids:
         st.info("No patients available to update.")
@@ -187,23 +243,31 @@ def render_receptionist_workspace(user: Dict[str, str]) -> None:
             if not (new_name and new_contact and new_diagnosis):
                 st.error("All fields are required to update a patient.")
             else:
-                patient_service.update_patient(
-                    patient_id=patient_choice,
-                    name=new_name,
-                    contact=new_contact,
-                    diagnosis=new_diagnosis,
-                    acted_by=user,
-                )
-                st.success(f"Patient #{patient_choice} updated.")
-                st.rerun()
+                try:
+                    patient_service.update_patient(
+                        patient_id=patient_choice,
+                        name=new_name,
+                        contact=new_contact,
+                        diagnosis=new_diagnosis,
+                        acted_by=user,
+                    )
+                except PermissionError as exc:
+                    st.error(str(exc))
+                except Exception as exc:
+                    st.error(f"Unable to update patient: {exc}")
+                else:
+                    st.success(f"Patient #{patient_choice} updated.")
+                    st.rerun()
 
 
 def render_footer() -> None:
     uptime_seconds = int(time.time() - st.session_state["app_start_time"])
     hours, remainder = divmod(uptime_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
+    db_ok = db.health_check()
+    status = "🟢 Database online" if db_ok else "🔴 Database issue detected"
     st.markdown("---")
-    st.caption(f"System uptime: {hours}h {minutes}m {seconds}s")
+    st.caption(f"System uptime: {hours}h {minutes}m {seconds}s | {status}")
 
 
 def main() -> None:
