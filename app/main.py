@@ -4,8 +4,9 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
+import pandas as pd
 import streamlit as st
 
 FILE_DIR = Path(__file__).resolve().parent
@@ -14,9 +15,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 try:
-    from .services import auth_service  # type: ignore
+    from .services import auth_service, log_service, patient_service  # type: ignore
 except ImportError:
-    from services import auth_service
+    from services import auth_service, log_service, patient_service
 
 
 def ensure_session_defaults() -> None:
@@ -54,16 +55,13 @@ def render_login() -> None:
 def sidebar_controls(current_user: Dict[str, str]) -> str:
     st.sidebar.success(f"Logged in as: {current_user['username']} ({current_user['role']})")
 
-    nav_options = []
     role = current_user["role"]
-    if role == "admin":
-        nav_options = ["Admin Dashboard", "Doctor View", "Receptionist Workspace"]
-    elif role == "doctor":
-        nav_options = ["Doctor View"]
-    elif role == "receptionist":
-        nav_options = ["Receptionist Workspace"]
-
-    selection = st.sidebar.radio("Navigation", nav_options)
+    nav_options = {
+        "admin": ["Admin Dashboard"],
+        "doctor": ["Doctor View"],
+        "receptionist": ["Receptionist Workspace"],
+    }
+    selection = st.sidebar.radio("Navigation", nav_options.get(role, []))
 
     if st.sidebar.button("Log out"):
         auth_service.logout_user(st.session_state)
@@ -72,21 +70,132 @@ def sidebar_controls(current_user: Dict[str, str]) -> str:
     return selection
 
 
-def render_admin_placeholder() -> None:
-    st.header("Admin Dashboard")
-    st.info(
-        "Upcoming: raw/anonymized patient tables, anonymization triggers, audit log access, CSV exports."
+def _render_patient_table(title: str, data: List[Dict]) -> None:
+    st.subheader(title)
+    if not data:
+        st.info("No records available.")
+        return
+    df = pd.DataFrame(data)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label=f"Download {title} CSV",
+        data=csv_bytes,
+        file_name=f"{title.lower().replace(' ', '_')}.csv",
+        mime="text/csv",
     )
 
 
-def render_doctor_placeholder() -> None:
+def render_admin_panel(user: Dict[str, str]) -> None:
+    if user["role"] != "admin":
+        st.error("You do not have permission to view this page.")
+        return
+
+    st.header("Admin Dashboard")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        raw_patients = patient_service.list_patients(view="raw")
+        _render_patient_table("Raw Patient Data", raw_patients)
+    with col2:
+        anonymized_patients = patient_service.list_patients(view="anonymized")
+        _render_patient_table("Anonymized Patient Data", anonymized_patients)
+
+    if st.button("Refresh Anonymized Fields"):
+        patient_service.refresh_anonymized_fields(acted_by=user)
+        st.success("Anonymized fields refreshed.")
+        st.rerun()
+
+    st.subheader("Audit Logs")
+    logs = log_service.list_logs(limit=200)
+    if logs:
+        logs_df = pd.DataFrame(logs)
+        st.dataframe(logs_df, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download Logs CSV",
+            logs_df.to_csv(index=False).encode("utf-8"),
+            file_name="audit_logs.csv",
+            mime="text/csv",
+        )
+    else:
+        st.info("No logs recorded yet.")
+
+
+def render_doctor_view(user: Dict[str, str]) -> None:
+    if user["role"] not in {"doctor", "admin"}:
+        st.error("You do not have permission to view this page.")
+        return
+
     st.header("Doctor View")
-    st.info("Upcoming: anonymized patient list with masked diagnosis per PRD.")
+    anonymized_patients = patient_service.list_patients(view="anonymized")
+    search = st.text_input("Search anonymized name or diagnosis code")
+    if search:
+        search_lower = search.lower()
+        anonymized_patients = [
+            p
+            for p in anonymized_patients
+            if search_lower in p["anonymized_name"].lower()
+            or search_lower in p["diagnosis_masked"].lower()
+        ]
+
+    _render_patient_table("Anonymized Patients", anonymized_patients)
 
 
-def render_receptionist_placeholder() -> None:
+def render_receptionist_workspace(user: Dict[str, str]) -> None:
+    if user["role"] not in {"receptionist", "admin"}:
+        st.error("You do not have permission to view this page.")
+        return
+
     st.header("Receptionist Workspace")
-    st.info("Upcoming: patient add/edit forms with validation, without revealing sensitive fields.")
+    st.caption("Add or update patient records. Sensitive/masked data remains hidden.")
+
+    with st.form("add_patient_form"):
+        st.subheader("Add New Patient")
+        name = st.text_input("Patient Name")
+        contact = st.text_input("Contact Number")
+        diagnosis = st.text_area("Diagnosis")
+        add_submitted = st.form_submit_button("Add Patient")
+        if add_submitted:
+            if not (name and contact and diagnosis):
+                st.error("All fields are required.")
+            else:
+                patient_id = patient_service.create_patient(
+                    name=name, contact=contact, diagnosis=diagnosis, acted_by=user
+                )
+                st.success(f"Patient record created with ID {patient_id}.")
+                st.rerun()
+
+    st.markdown("---")
+    st.subheader("Update Existing Patient")
+    patients = patient_service.list_patients(view="raw")
+    patient_ids = [p["patient_id"] for p in patients]
+    if not patient_ids:
+        st.info("No patients available to update.")
+        return
+
+    with st.form("edit_patient_form"):
+        patient_choice = st.selectbox(
+            "Select Patient ID to update",
+            patient_ids,
+            format_func=lambda pid: f"Patient #{pid}",
+        )
+        new_name = st.text_input("New Patient Name")
+        new_contact = st.text_input("New Contact Number")
+        new_diagnosis = st.text_area("New Diagnosis")
+        update_submitted = st.form_submit_button("Update Patient")
+        if update_submitted:
+            if not (new_name and new_contact and new_diagnosis):
+                st.error("All fields are required to update a patient.")
+            else:
+                patient_service.update_patient(
+                    patient_id=patient_choice,
+                    name=new_name,
+                    contact=new_contact,
+                    diagnosis=new_diagnosis,
+                    acted_by=user,
+                )
+                st.success(f"Patient #{patient_choice} updated.")
+                st.rerun()
 
 
 def render_footer() -> None:
@@ -110,11 +219,11 @@ def main() -> None:
     selection = sidebar_controls(current_user)
     try:
         if selection == "Admin Dashboard":
-            render_admin_placeholder()
+            render_admin_panel(current_user)
         elif selection == "Doctor View":
-            render_doctor_placeholder()
+            render_doctor_view(current_user)
         elif selection == "Receptionist Workspace":
-            render_receptionist_placeholder()
+            render_receptionist_workspace(current_user)
         else:
             st.warning("Unknown section selected.")
     except Exception as exc:  # pragma: no cover - UI safeguard

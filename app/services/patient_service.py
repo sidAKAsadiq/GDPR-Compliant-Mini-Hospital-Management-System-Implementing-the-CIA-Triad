@@ -189,3 +189,37 @@ def delete_patient(patient_id: int, *, acted_by: Dict[str, Any]) -> None:
         details=f"patient_id={patient_id}",
     )
 
+
+def refresh_anonymized_fields(*, acted_by: Dict[str, Any]) -> None:
+    """Re-mask all patients, useful if rules change."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT patient_id, name, contact, diagnosis FROM patients"
+        )
+        rows = cursor.fetchall()
+
+        for row in rows:
+            diagnosis_plain = decrypt_sensitive(row["diagnosis"])
+            new_fields = _anonymized_fields(row["name"], row["contact"], diagnosis_plain)
+            conn.execute(
+                """
+                UPDATE patients
+                SET anonymized_name = ?, anonymized_contact = ?, diagnosis_masked = ?,
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE patient_id = ?
+                """,
+                (
+                    new_fields["anonymized_name"],
+                    new_fields["anonymized_contact"],
+                    new_fields["diagnosis_masked"],
+                    row["patient_id"],
+                ),
+            )
+
+    log_action(
+        user_id=acted_by["user_id"],
+        role=acted_by["role"],
+        action="refresh_anonymization",
+        details="Recomputed anonymized fields for all patients",
+    )
+
