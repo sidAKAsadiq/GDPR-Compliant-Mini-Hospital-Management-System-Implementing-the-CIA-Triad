@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 FILE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = FILE_DIR.parents[1]
+DATA_DIR = PROJECT_ROOT / "data"
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
@@ -28,14 +30,25 @@ except ImportError:  # pragma: no cover - optional dependency
 
 FERNET_KEY = os.getenv("FERNET_KEY")
 FERNET = None
+FERNET_KEY_PATH = DATA_DIR / "fernet.key"
+
+if not FERNET_KEY and Fernet:
+    if FERNET_KEY_PATH.exists():
+        FERNET_KEY = FERNET_KEY_PATH.read_text().strip()
+    else:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        generated_key = Fernet.generate_key().decode("utf-8")
+        FERNET_KEY_PATH.write_text(generated_key)
+        FERNET_KEY = generated_key
+
 if FERNET_KEY and Fernet:
     try:
         FERNET = Fernet(FERNET_KEY)
     except ValueError:
-        # Invalid key provided; fall back to plain-text storage
         FERNET = None
 
 
+RETENTION_DAYS = int(os.getenv("DATA_RETENTION_DAYS", "90"))
 RAW_VIEW_ROLES: Set[str] = {"admin", "receptionist"}
 ANON_VIEW_ROLES: Set[str] = {"admin", "doctor"}
 WRITE_ROLES: Set[str] = {"admin", "receptionist"}
@@ -88,6 +101,20 @@ def _require_role(acted_by: Optional[Dict[str, Any]], allowed_roles: Set[str], a
 def _format_patient_row(row) -> Dict[str, Any]:
     record = dict(row)
     record["diagnosis"] = decrypt_sensitive(record["diagnosis"])
+    if RETENTION_DAYS:
+        added_str = record.get("date_added")
+        if added_str:
+            try:
+                added_dt = datetime.fromisoformat(str(added_str))
+            except ValueError:
+                added_dt = datetime.strptime(added_str, "%Y-%m-%d %H:%M:%S")
+            deadline = added_dt + timedelta(days=RETENTION_DAYS)
+            days_remaining = (deadline - datetime.utcnow()).days
+            record["retention_deadline"] = deadline.isoformat()
+            record["retention_days_remaining"] = days_remaining
+        else:
+            record["retention_deadline"] = None
+            record["retention_days_remaining"] = None
     return record
 
 

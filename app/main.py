@@ -15,8 +15,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
 try:
-    from . import db  # type: ignore
-    from .services import auth_service, log_service, patient_service  # type: ignore
+    from . import db 
+    from .services import auth_service, log_service, patient_service 
 except ImportError:
     import db
     from services import auth_service, log_service, patient_service
@@ -29,11 +29,17 @@ def ensure_session_defaults() -> None:
         st.session_state["app_start_time"] = time.time()
     if "login_error" not in st.session_state:
         st.session_state["login_error"] = ""
+    if "consent_ack" not in st.session_state:
+        st.session_state["consent_ack"] = False
 
 
 def render_login() -> None:
     st.title("Hospital Privacy Dashboard — Login")
     st.caption("GDPR-aware Mini Hospital Management System")
+    st.info(
+        "By continuing you consent to processing patient data under GDPR guidelines, "
+        "including logging of your activity for audit purposes."
+    )
 
     if st.session_state["login_error"]:
         st.error(st.session_state["login_error"])
@@ -41,17 +47,27 @@ def render_login() -> None:
     with st.form("login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
+        consent = st.checkbox(
+            "I consent to the processing and auditing of my activity.",
+            value=st.session_state.get("consent_ack", False),
+        )
         submitted = st.form_submit_button("Sign in")
 
         if submitted:
-            user = auth_service.authenticate_user(username, password)
-            if user:
-                auth_service.set_session_user(st.session_state, user)
-                st.session_state["login_error"] = ""
+            if not consent:
+                st.session_state["login_error"] = "Consent is required before logging in."
+                st.session_state["consent_ack"] = False
                 st.rerun()
             else:
-                st.session_state["login_error"] = "Invalid credentials. Please try again."
-                st.rerun()
+                user = auth_service.authenticate_user(username, password)
+                if user:
+                    auth_service.set_session_user(st.session_state, user)
+                    st.session_state["login_error"] = ""
+                    st.session_state["consent_ack"] = True
+                    st.rerun()
+                else:
+                    st.session_state["login_error"] = "Invalid credentials. Please try again."
+                    st.rerun()
 
 
 def sidebar_controls(current_user: Dict[str, str]) -> str:
@@ -96,21 +112,37 @@ def render_admin_panel(user: Dict[str, str]) -> None:
     st.header("Admin Dashboard")
 
     col1, col2 = st.columns(2)
+    raw_patients: List[Dict]
+    anonymized_patients: List[Dict]
     try:
-        with col1:
-            raw_patients = patient_service.list_patients(view="raw", requested_by=user)
-            _render_patient_table("Raw Patient Data", raw_patients)
-        with col2:
-            anonymized_patients = patient_service.list_patients(
-                view="anonymized", requested_by=user
-            )
-            _render_patient_table("Anonymized Patient Data", anonymized_patients)
+        raw_patients = patient_service.list_patients(view="raw", requested_by=user)
+        anonymized_patients = patient_service.list_patients(
+            view="anonymized", requested_by=user
+        )
     except PermissionError as exc:
         st.error(str(exc))
         return
     except Exception as exc:
         st.error(f"Unable to load patient tables: {exc}")
         return
+
+    with col1:
+        _render_patient_table("Raw Patient Data", raw_patients)
+    with col2:
+        _render_patient_table("Anonymized Patient Data", anonymized_patients)
+
+    retention_days = [
+        r["retention_days_remaining"]
+        for r in raw_patients
+        if isinstance(r.get("retention_days_remaining"), int)
+    ]
+    if retention_days:
+        soonest = min(retention_days)
+        expiring = sum(1 for d in retention_days if d <= 7)
+        st.info(
+            f"Retention policy: {len(retention_days)} records tracked. "
+            f"{expiring} records expire within 7 days. Soonest expiry in {soonest} days."
+        )
 
     if st.button("Refresh Anonymized Fields"):
         try:
@@ -139,6 +171,11 @@ def render_admin_panel(user: Dict[str, str]) -> None:
             file_name="audit_logs.csv",
             mime="text/csv",
         )
+        with st.expander("Activity Trend"):
+            logs_df["timestamp"] = pd.to_datetime(logs_df["timestamp"])
+            logs_df["date"] = logs_df["timestamp"].dt.date
+            counts = logs_df.groupby("date").size().reset_index(name="events")
+            st.bar_chart(data=counts, x="date", y="events")
     else:
         st.info("No logs recorded yet.")
 
